@@ -24,12 +24,35 @@ int main(int argc, char **argv){
 		if( !strcmp(argv[1], "-format")){
 			fs_format();
 		}
+
+		if( !strcmp(argv[1], "-create")){
+			fs_create(argv[2], argv[3]);
+		}
+
+		if( !strcmp(argv[1], "-read")){
+			fs_read(argv[2], argv[3]);
+		}
+		
+		if( !strcmp(argv[1], "-del")){
+			fs_del(argv[2]);
+		}
+		
+		if( !strcmp(argv[1], "-ls")){
+			fs_ls(argv[2]);
+		}
+		
+		if( !strcmp(argv[1], "-mkdir")){
+			fs_mkdir(argv[2]);
+		}
+
+		if( !strcmp(argv[1], "-rmdir")){
+			fs_rmdir(argv[2]);
+		}
 		
 	}
 	
 	
 	/* Implement the other filesystem calls here!! */
-	
 	
 	
 	/* Create a map of used/free disk sectors. */
