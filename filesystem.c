@@ -61,7 +61,7 @@ int fs_create(char* input_file, char* simul_file){
 	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
 		return ret;
 	}
-	//rola definitiva;
+
 	/* Write the code to load a new file to the simulated filesystem. */
 	
 	ds_stop();
