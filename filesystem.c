@@ -4,6 +4,8 @@
 #include <sys/wait.h>
 #include "libdisksimul.h"
 #include "filesystem.h"
+#define DATA_LENGTH 508
+#define DIR_LENGTH 16
 
 /**
  * @brief Format disk.
@@ -19,7 +21,7 @@ int fs_format(){
 		return ret;
 	}
 	
-	memset (&sector0, 0, sizeof(struct sector_0));
+	memset(&sector0, 0, sizeof(struct sector_0));
 	
 	/* first free sector. */
 	sector0.free_sectors_list = 2;
@@ -49,6 +51,36 @@ int fs_format(){
 	return 0;
 }
 
+locateDir(&dir, simul_file, filename, &sec)
+int locateDir(struct table_directory* dir, char *absoluteDir, char *file, int *section){
+	int i, flag = 0;
+	char dirBuff[20];
+	memset(dirBuff, 0, sizeof(dirBuff));
+	for (i = 0; i < strlen(simul_file); i++)
+	{
+		if (simul_file[i] == '/'){
+			flag = 1;
+			break;
+		}else{
+			if(i>20) return 1;
+			dirBuff[i] = simul_file[i];
+		}
+	}
+	if (strlen(dirBuff) > 0)
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i] == NULL || dir.entries[i].sector_start == 0){
+			continue;
+		}
+		if (!strcmp(dirBuff, dir.entries[i].name)){
+			if (dir.entries[i].dir == 1){
+				return locateDir();
+			} else return 1;
+		}
+	}
+	return 1;
+		
+}
+
 /**
  * @brief Create a new file on the simulated filesystem.
  * @param input_file Source file path.
@@ -57,13 +89,146 @@ int fs_format(){
  */
 int fs_create(char* input_file, char* simul_file){
 	int ret;
-	
+	struct stat b;
+
+	if (strlen(simul_file)<2 || simul_file[0] != '/'){
+		/* Param error */
+		perror("simul_file is not valid: ");
+		return 1;
+	}
+
 	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
 		return ret;
 	}
+	FILE* file =  NULL;
+	/* Check if the input_file exists and open it */
+	if( stat(input_file, &b) == 0){
+		if( (file = fopen(input_file, "rb")) == NULL){
+			/* error openning the file */
+			perror("fopen: ");
+			ds_stop();
+			return 1;
+		}
+	}else{
+		/* error file not exist */
+		perror("fileNotExist: ");
+		ds_stop();
+		return 1;
+	}
 
-	/* Write the code to load a new file to the simulated filesystem. */
-	
+	struct sector_0 sector0;
+    memset(sector0, 0, sizeof(sector0));
+	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE)) != 0){
+		ds_stop();
+		return ret;
+	}
+	if (sector0.free_sectors_list == 0){
+		/* error end of memory */
+		perror("EndOfMemory: ");
+		ds_stop();
+		return 1;
+	}
+	struct sector_data freeSector;
+    memset(freeSector, 0, sizeof(freeSector));
+	if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE)) != 0){
+		ds_stop();
+		return ret;
+	}
+
+	struct table_directory dir;
+    memset(dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE)) != 0){
+		ds_stop();
+		return ret;
+	}
+	char filename[20];
+	unsigned int sec;
+	if ( (ret = locateDir(&dir, simul_file, filename, &sec)) != 0){
+		ds_stop();
+		return ret;
+	}
+	int i;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i] == NULL){
+			struct file_dir_entry entry;
+			memset(&entry, 0, sizeof(entry));
+			dir.entries[i] = entry;
+		}	
+		if (dir.entries[i].sector_start == 0){
+			dir.entries[i].dir = 0;
+			dir.entries[i].name = filename;
+			dir.entries[i].size_bytes = b.st_size;	
+			dir.entries[i].sector_start = sector0.free_sectors_list;
+			break;
+		}
+		
+	}	
+
+	int n;
+	unsigned int last = 0;
+    while((n = fread(freeSector.data, sizeof(char), DATA_LENGTH, file)) == DATA_LENGTH){
+        if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+		last = sector0.free_sectors_list;
+		sector0.free_sectors_list = freeSector.next_sector;
+		if (sector0.free_sectors_list == 0){
+			/* error end of memory */
+			perror("EndOfMemory: ");
+			ds_stop();
+			return 1;
+		}
+        memset(freeSector, 0, sizeof(freeSector));
+		if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE)) != 0){
+			ds_stop();
+			return ret;
+		}
+    }
+	if(n != 0){
+		unsigned int aux = freeSector.next_sector;
+		freeSector.next_sector = 0;
+		if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+		sector0.free_sectors_list = aux;
+		if ( (ret = ds_write_sector(0, (void*)&sector0, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+		if ( (ret = ds_write_sector(sec, (void*)&dir, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+	}else if(last != 0){
+		memset(freeSector, 0, sizeof(freeSector));
+		if ( (ret = ds_read_sector(last, (void*)&freeSector, SECTOR_SIZE)) != 0){
+			ds_stop();
+			return ret;
+		}
+		freeSector.next_sector = 0;
+		if ( (ret = ds_write_sector(last, (void*)&freeSector, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+		sector0.free_sectors_list = aux;
+		if ( (ret = ds_write_sector(0, (void*)&sector0, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+		if ( (ret = ds_write_sector(sec, (void*)&dir, SECTOR_SIZE) != 0){
+			ds_stop();
+			return ret;
+		}
+	}else {
+		/* error input_file void */
+		perror("Input_file is Void: ");
+		ds_stop();
+		return 1;
+	}	
+    fclose(file);	
+
 	ds_stop();
 	
 	return 0;
