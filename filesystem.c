@@ -17,7 +17,7 @@ int fs_format(){
 	struct sector_0 sector0;
 	struct sector_data sector;
 	
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 1)) != 0 ){
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 1))){
 		return ret;
 	}
 	
@@ -51,31 +51,51 @@ int fs_format(){
 	return 0;
 }
 
-locateDir(&dir, simul_file, filename, &sec)
-int locateDir(struct table_directory* dir, char *absoluteDir, char *file, int *section){
-	int i, flag = 0;
-	char dirBuff[20];
-	memset(dirBuff, 0, sizeof(dirBuff));
-	for (i = 0; i < strlen(simul_file); i++)
+/**
+ * @brief Localize a directory.
+ * @param dir Directory struct reference.
+ * @param absoluteDir Destination file path on the simulated file system.
+ * @param file File name residue in absoluteDir
+ * @param section Reference to section locate of directory localized 
+ * @param showLabel Set 1 to print directory name or 0 to not print  
+ * @return 0 on success.
+ */
+int locateDir(struct table_directory* dir, char *absoluteDir, char **file, unsigned int *section, char showLabel){
+	int i, newDir = 0, j;
+	char *dirBuff = (char*)calloc(20, 1);
+	for (i = 0; i < strlen(absoluteDir); i++)
 	{
-		if (simul_file[i] == '/'){
-			flag = 1;
+		if (absoluteDir[i] == '/'){
+			if (i+1 >= strlen(absoluteDir)) return 1;
+			newDir = 1;
 			break;
 		}else{
 			if(i>20) return 1;
-			dirBuff[i] = simul_file[i];
+			dirBuff[i] = absoluteDir[i];
 		}
 	}
-	if (strlen(dirBuff) > 0)
-	for (i = 0; i < DIR_LENGTH; i++){
-		if (dir.entries[i] == NULL || dir.entries[i].sector_start == 0){
-			continue;
+	if (strlen(dirBuff) < 1) return 1;
+	if (newDir){
+		for (j = 0; j < DIR_LENGTH; j++){
+			if (!dir->entries[j].sector_start){
+				continue;
+			}			
+			if (!strcmp(dirBuff, dir->entries[j].name)){
+				if (dir->entries[j].dir){
+					if (section) *section = dir->entries[j].sector_start;
+					int ret;
+					if ((ret = ds_read_sector(dir->entries[j].sector_start, (void*)dir, SECTOR_SIZE))){
+						ds_stop();
+						return ret;
+					}
+					free(dirBuff);
+					return locateDir(dir, absoluteDir+i+1, file, section, showLabel);
+				} else return 1;
+			}		
 		}
-		if (!strcmp(dirBuff, dir.entries[i].name)){
-			if (dir.entries[i].dir == 1){
-				return locateDir();
-			} else return 1;
-		}
+	} else {
+		if (file) *file = dirBuff;
+		return 0;
 	}
 	return 1;
 		
@@ -97,7 +117,7 @@ int fs_create(char* input_file, char* simul_file){
 		return 1;
 	}
 
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	FILE* file =  NULL;
@@ -116,58 +136,76 @@ int fs_create(char* input_file, char* simul_file){
 		return 1;
 	}
 
+	// check the existence of space for new data
 	struct sector_0 sector0;
-    memset(sector0, 0, sizeof(sector0));
-	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE)) != 0){
+    memset(&sector0, 0, sizeof(sector0));
+	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE))){
+		fclose(file);
 		ds_stop();
 		return ret;
 	}
 	if (sector0.free_sectors_list == 0){
 		/* error end of memory */
 		perror("EndOfMemory: ");
+		fclose(file);
 		ds_stop();
 		return 1;
 	}
 	struct sector_data freeSector;
-    memset(freeSector, 0, sizeof(freeSector));
-	if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE)) != 0){
+    memset(&freeSector, 0, sizeof(freeSector));
+	if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE))){
+		fclose(file);
 		ds_stop();
 		return ret;
 	}
 
+	// check the directory existence and create the structure for save
 	struct table_directory dir;
-    memset(dir, 0, sizeof(dir));
-	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE)) != 0){
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		fclose(file);
 		ds_stop();
 		return ret;
 	}
-	char filename[20];
-	unsigned int sec;
-	if ( (ret = locateDir(&dir, simul_file, filename, &sec)) != 0){
+	char *filename;
+	unsigned int sec = 1;
+	if ( (ret = locateDir(&dir, simul_file+1, &filename, &sec, 0))){
+		perror("Not is possible localize directory: ");
+		fclose(file);
 		ds_stop();
 		return ret;
+	}
+	if (strlen(filename) < 1){
+		perror("Invalid file name: ");
+		fclose(file);
+		ds_stop();
+		return 1;
 	}
 	int i;
+	char hasSpace = 0;	
 	for (i = 0; i < DIR_LENGTH; i++){
-		if (dir.entries[i] == NULL){
-			struct file_dir_entry entry;
-			memset(&entry, 0, sizeof(entry));
-			dir.entries[i] = entry;
-		}	
-		if (dir.entries[i].sector_start == 0){
+		if (!dir.entries[i].sector_start){
 			dir.entries[i].dir = 0;
-			dir.entries[i].name = filename;
+			strcpy(dir.entries[i].name, filename);
 			dir.entries[i].size_bytes = b.st_size;	
 			dir.entries[i].sector_start = sector0.free_sectors_list;
+			hasSpace = 1;
 			break;
 		}
-		
-	}	
-
+	}
+	if (!hasSpace){
+		perror("Directory is loted: ");
+		fclose(file);
+		ds_stop();
+		return 1;
+	}
+	
+	// save the new file
 	int n;
 	unsigned int last = 0;
     while((n = fread(freeSector.data, sizeof(char), DATA_LENGTH, file)) == DATA_LENGTH){
-        if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE) != 0){
+        if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE))){
+			fclose(file);
 			ds_stop();
 			return ret;
 		}
@@ -176,57 +214,58 @@ int fs_create(char* input_file, char* simul_file){
 		if (sector0.free_sectors_list == 0){
 			/* error end of memory */
 			perror("EndOfMemory: ");
+			fclose(file);
 			ds_stop();
 			return 1;
 		}
-        memset(freeSector, 0, sizeof(freeSector));
-		if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE)) != 0){
+        memset(&freeSector, 0, sizeof(freeSector));
+		if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE))){
+			fclose(file);
 			ds_stop();
 			return ret;
 		}
     }
-	if(n != 0){
-		unsigned int aux = freeSector.next_sector;
+	unsigned int aux;
+	if(n != 0){ // until exists data for saving
+		aux = freeSector.next_sector;
 		freeSector.next_sector = 0;
-		if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE) != 0){
+		if ( (ret = ds_write_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE))){
+			fclose(file);
 			ds_stop();
 			return ret;
 		}
-		sector0.free_sectors_list = aux;
-		if ( (ret = ds_write_sector(0, (void*)&sector0, SECTOR_SIZE) != 0){
+	}else if(last != 0){ // set the final of file in last section saved
+		memset(&freeSector, 0, sizeof(freeSector));
+		if ( (ret = ds_read_sector(last, (void*)&freeSector, SECTOR_SIZE))){
+			fclose(file);
 			ds_stop();
 			return ret;
 		}
-		if ( (ret = ds_write_sector(sec, (void*)&dir, SECTOR_SIZE) != 0){
-			ds_stop();
-			return ret;
-		}
-	}else if(last != 0){
-		memset(freeSector, 0, sizeof(freeSector));
-		if ( (ret = ds_read_sector(last, (void*)&freeSector, SECTOR_SIZE)) != 0){
-			ds_stop();
-			return ret;
-		}
+		aux = freeSector.next_sector;
 		freeSector.next_sector = 0;
-		if ( (ret = ds_write_sector(last, (void*)&freeSector, SECTOR_SIZE) != 0){
-			ds_stop();
-			return ret;
-		}
-		sector0.free_sectors_list = aux;
-		if ( (ret = ds_write_sector(0, (void*)&sector0, SECTOR_SIZE) != 0){
-			ds_stop();
-			return ret;
-		}
-		if ( (ret = ds_write_sector(sec, (void*)&dir, SECTOR_SIZE) != 0){
+		if ( (ret = ds_write_sector(last, (void*)&freeSector, SECTOR_SIZE))){
+			fclose(file);
 			ds_stop();
 			return ret;
 		}
 	}else {
 		/* error input_file void */
 		perror("Input_file is Void: ");
+		fclose(file);
 		ds_stop();
 		return 1;
 	}	
+	sector0.free_sectors_list = aux;
+	if ( (ret = ds_write_sector(0, (void*)&sector0, SECTOR_SIZE))){ // write the free sector list
+		fclose(file);
+		ds_stop();
+		return ret;
+	}
+	if ( (ret = ds_write_sector(sec, (void*)&dir, SECTOR_SIZE))){ // write the directory sector
+		fclose(file);
+		ds_stop();
+		return ret;
+	}
     fclose(file);	
 
 	ds_stop();
@@ -242,12 +281,105 @@ int fs_create(char* input_file, char* simul_file){
  */
 int fs_read(char* output_file, char* simul_file){
 	int ret;
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+	
+	if (strlen(simul_file)<2 || simul_file[0] != '/'){
+		/* Param error */
+		perror("simul_file is not valid: ");
+		return 1;
+	}
+
+	if (strlen(output_file)<1 || output_file[strlen(output_file)-1] == '/'){
+		/* Param error */
+		perror("output_file is not valid: ");
+		return 1;
+	}
+	
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
-		
-	/* Write the code to read a file from the simulated filesystem. */
-	
+
+	FILE* file =  NULL;
+	/* Create the file for output */
+	if( (file = fopen(output_file, "wb")) == NULL){
+		/* error creating the file */
+		perror("fopen: ");
+		ds_stop();
+		return 1;
+	}
+
+	// check the file existence in simul
+	struct table_directory dir;
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		fclose(file);
+		ds_stop();
+		return ret;
+	}
+	char *filename;
+	unsigned int sec = 1;
+	if ( (ret = locateDir(&dir, simul_file+1, &filename, &sec, 0))){
+		perror("Not is possible localize directory: ");
+		fclose(file);
+		ds_stop();
+		return ret;
+	}
+	if (strlen(filename) < 1){
+		perror("Invalid input_file name: ");
+		fclose(file);
+		ds_stop();
+		return 1;
+	}
+
+	int i;	
+	char flag = 0;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start && !dir.entries[i].dir && !strcmp(dir.entries[i].name, filename)){
+			flag = 1;
+			break;
+		}
+	}	
+	if (!flag) {
+		perror("Not is possible find the input_file: ");
+		fclose(file);
+		ds_stop();
+		return 1;
+	}
+	int lastPiece = dir.entries[i].size_bytes%DATA_LENGTH;
+
+	// read input file and write in output file
+	struct sector_data data;
+	memset(&data, 0, sizeof(data));
+	if ( (ret = ds_read_sector(dir.entries[i].sector_start, (void*)&data, SECTOR_SIZE))){
+		perror("error when read the file: ");
+		fclose(file);
+		ds_stop();
+		return ret;
+	}
+
+	while (data.next_sector){
+		if ( !(ret = fwrite(data.data, sizeof(char), DATA_LENGTH, file))){
+			perror("error when write in the outpu_file: ");
+			fclose(file);
+			ds_stop();
+			return ret;
+		}
+		if ( (ret = ds_read_sector(data.next_sector, (void*)&data, SECTOR_SIZE))){
+			perror("error when read the file: ");
+			fclose(file);
+			ds_stop();
+			return ret;
+		}
+	}
+	if (lastPiece){
+		if ( !(ret = fwrite(data.data, sizeof(char), lastPiece, file))){
+			perror("error when write last piece in the outpu_file: ");
+			fclose(file);
+			ds_stop();
+			return ret;
+		}
+	}	
+
+	fclose(file);
 	ds_stop();
 	
 	return 0;
@@ -260,12 +392,96 @@ int fs_read(char* output_file, char* simul_file){
  */
 int fs_del(char* simul_file){
 	int ret;
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+
+	if (strlen(simul_file)<2 || simul_file[0] != '/'){
+		/* Param error */
+		perror("simul_file is not valid: ");
+		return 1;
+	}
+
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	
-	/* Write the code delete a file from the simulated filesystem. */
+	// check the file existence in simul
+	struct table_directory dir;
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	char *filename;
+	unsigned int sec = 1;
+	if ( (ret = locateDir(&dir, simul_file+1, &filename, &sec, 0))){
+		perror("Not is possible localize directory: ");
+		ds_stop();
+		return ret;
+	}
+	if (strlen(filename) < 1){
+		perror("Invalid input_file name: ");
+		ds_stop();
+		return 1;
+	}
+
+	int i;	
+	char flag = 0;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start && !dir.entries[i].dir && !strcmp(dir.entries[i].name, filename)){
+			flag = 1;
+			break;
+		}
+	}	
+	if (!flag) {
+		perror("Not is possible find the input_file: ");
+		ds_stop();
+		return 1;
+	}
+
+	// Delete input file
+	struct sector_data data;
+	memset(&data, 0, sizeof(data));
+	if ( (ret = ds_read_sector(dir.entries[i].sector_start, (void*)&data, SECTOR_SIZE))){
+		perror("error when read the file: ");
+		ds_stop();
+		return ret;
+	}
 	
+	struct sector_0 sector0;
+    memset(&sector0, 0, sizeof(sector0));
+	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	unsigned int last;
+	do{
+		last = data.next_sector;
+		if ( (ret = ds_read_sector(data.next_sector, (void*)&data, SECTOR_SIZE))){
+			perror("error when read the file: ");
+			ds_stop();
+			return ret;
+		}
+	} while (data.next_sector);
+	data.next_sector = sector0.free_sectors_list;
+	if ((ret = ds_write_sector(last, &data, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
+	sector0.free_sectors_list = dir.entries[i].sector_start;
+	if ((ret = ds_write_sector(0, &sector0, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
+	dir.entries[i].sector_start = 0;
+	if ((ret = ds_write_sector(sec, &dir, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
 	ds_stop();
 	
 	return 0;
@@ -278,12 +494,55 @@ int fs_del(char* simul_file){
  */
 int fs_ls(char *dir_path){
 	int ret;
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+
+	if (strlen(dir_path)<1 || dir_path[0] != '/'){
+		/* Param error */
+		perror("dir_path is not valid: ");
+		return 1;
+	}
+
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	
-	/* Write the code to show files or directories. */
+	struct table_directory dir;
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	char *filename;
+	if (strlen(dir_path) > 1)	
+	if ( (ret = locateDir(&dir, dir_path+1, &filename, NULL, 0))){
+		perror("Not is possible localize directory: ");
+		ds_stop();
+		return ret;
+	}
 	
+	int i;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start && !strcmp(dir.entries[i].name, filename))
+		{
+			if (!dir.entries[i].dir){
+				perror("Not is possible localize directory: ");
+				ds_stop();
+				return ret;
+			}
+			if ( (ret = ds_read_sector(dir.entries[i].sector_start, (void*)&dir, SECTOR_SIZE))){
+				ds_stop();
+				return ret;
+			}
+			break;
+		}
+	}
+	
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start)
+		{
+			printf(" => %c %s\t%d bytes\n", (dir.entries[i].dir)?'d':'f', dir.entries[i].name, dir.entries[i].size_bytes);
+		}
+	}
+
 	ds_stop();
 	
 	return 0;
@@ -296,12 +555,97 @@ int fs_ls(char *dir_path){
  */
 int fs_mkdir(char* directory_path){
 	int ret;
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+	if (strlen(directory_path)<2 || directory_path[0] != '/'){
+		/* Param error */
+		perror("directory_path is not valid: ");
+		return 1;
+	}
+
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	
-	/* Write the code to create a new directory. */
-	
+	// check the directory
+	struct table_directory dir;
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	unsigned int sec = 1;
+	char *filename;
+	if ( (ret = locateDir(&dir, directory_path+1, &filename, &sec, 0))){
+		perror("Not is possible localize directory: ");
+		ds_stop();
+		return ret;
+	}
+	int i;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start && !strcmp(dir.entries[i].name, filename))
+		{
+			perror("Not is possible create this directory, alredy exist a file with it name: ");
+			ds_stop();
+			return ret;
+		}
+	}
+	char flag = 0;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (!dir.entries[i].sector_start)
+		{
+			flag = 1;
+			break;
+		}
+	}
+	if (!flag){
+		perror("Directory is loted: ");
+		ds_stop();
+		return 1;
+	}
+
+	// check the existence of space for new data
+	struct sector_0 sector0;
+    memset(&sector0, 0, sizeof(sector0));
+	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	if (sector0.free_sectors_list == 0){
+		/* error end of memory */
+		perror("EndOfMemory: ");
+		ds_stop();
+		return 1;
+	}
+	struct sector_data freeSector;
+    memset(&freeSector, 0, sizeof(freeSector));
+	if ( (ret = ds_read_sector(sector0.free_sectors_list, (void*)&freeSector, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+
+	struct table_directory newDir;
+	memset(&newDir, 0, sizeof(newDir));
+	if ((ret = ds_write_sector(sector0.free_sectors_list, &newDir, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+	dir.entries[i].sector_start = sector0.free_sectors_list;
+	dir.entries[i].dir = 1;
+	strcpy(dir.entries[i].name, filename);
+	dir.entries[i].size_bytes = 0;
+	if ((ret = ds_write_sector(sec, &dir, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
+	sector0.free_sectors_list = freeSector.next_sector;
+	if ((ret = ds_write_sector(0, &sector0, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
 	ds_stop();
 	
 	return 0;
@@ -314,12 +658,102 @@ int fs_mkdir(char* directory_path){
  */
 int fs_rmdir(char *directory_path){
 	int ret;
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+	if (strlen(directory_path)<3 || directory_path[0] != '/' || directory_path[strlen(directory_path)-1] != '/'){
+		/* Param error */
+		perror("directory_path is not valid: ");
+		return 1;
+	}
+
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	
-	/* Write the code to delete a directory. */
+	// check the file existence in simul
+	struct table_directory dir;
+    memset(&dir, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(1, (void*)&dir, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+	char *filename;
+	unsigned int sec = 1;
+	char *labelAux = (char*)calloc(strlen(directory_path), 1);
+	strcpy(labelAux, directory_path+1);
+
+	labelAux[strlen(labelAux)-1] = 0;
+	if ( (ret = locateDir(&dir, labelAux, &filename, &sec, 0))){
+		perror("Not is possible localize directory: ");
+		ds_stop();
+		return ret;
+	}
 	
+	if (strlen(filename) < 1){
+		perror("Invalid directory_path name: ");
+		ds_stop();
+		return 1;
+	}
+	int i;	
+	char flag = 0;
+	for (i = 0; i < DIR_LENGTH; i++){
+		if (dir.entries[i].sector_start && dir.entries[i].dir && !strcmp(dir.entries[i].name, filename)){
+			flag = 1;
+			break;
+		}
+	}	
+	if (!flag) {
+		perror("Not is possible find the directory_path: ");
+		ds_stop();
+		return 1;
+	}
+
+	// Delete input directory
+	struct table_directory dirDel;
+	memset(&dirDel, 0, sizeof(dir));
+	if ( (ret = ds_read_sector(dir.entries[i].sector_start, (void*)&dirDel, SECTOR_SIZE))){
+		perror("error when read the file: ");
+		ds_stop();
+		return ret;
+	}
+
+	int j;
+	for (j = 0; j < DIR_LENGTH; j++)
+	{
+		if(dirDel.entries[j].sector_start)
+		{
+			perror("Directory not void: ");
+			ds_stop();
+			return ret;
+		}
+	}
+	
+	struct sector_0 sector0;
+    memset(&sector0, 0, sizeof(sector0));
+	if ( (ret = ds_read_sector(0, (void*)&sector0, SECTOR_SIZE))){
+		ds_stop();
+		return ret;
+	}
+
+	struct sector_data aux;
+	aux.next_sector = sector0.free_sectors_list;
+	if ((ret = ds_write_sector(dir.entries[i].sector_start, &aux, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+	sector0.free_sectors_list = dir.entries[i].sector_start;
+	if ((ret = ds_write_sector(0, &sector0, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
+	dir.entries[i].sector_start = 0;
+	if ((ret = ds_write_sector(sec, &dir, SECTOR_SIZE))){
+		perror("error when write: ");
+		ds_stop();
+		return ret;
+	}
+
 	ds_stop();
 	
 	return 0;
@@ -341,7 +775,7 @@ int fs_free_map(char *log_f){
 	int free_space = 0;
 	char* exec_params[] = {"gnuplot", "sector_map.gnuplot" , NULL};
 
-	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0)) != 0 ){
+	if ( (ret = ds_init(FILENAME, SECTOR_SIZE, NUMBER_OF_SECTORS, 0))){
 		return ret;
 	}
 	
